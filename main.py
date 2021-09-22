@@ -7,6 +7,21 @@ import random
 import time
 import base64
 import binascii
+import logging
+import sys
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter("[{asctime} | {levelname}]: {message}", style="{", datefmt="%m-%d-%Y %I:%M:%S %p")
+
+file_handler = logging.FileHandler("ClassroomToTrello.log", "a")
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+stream_handler = logging.StreamHandler(sys.stdout)
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
 
 
 # TODO: handle questions
@@ -50,11 +65,13 @@ class TrelloCard:
         self.classroom_type = classroom_type
 
     @classmethod
-    def from_email(cls, email_message: email.message.Message):  # Should support pre-redesign emails, just in case.
-        print(email_message["subject"])
+    def from_email(cls, email_message: email.message.Message):  # Supports pre-redesign emails, just in case.
         assert "New assignment" in email_message["subject"] or "New material" in email_message["subject"]
         assert email_message["from"].endswith("classroom.google.com>")
         assert email_message.is_multipart()  # payload 1 is raw text, 2 is html
+
+        logger.info(f'Generating card for: Subject: {email_message["subject"]}')
+        logger.debug(f"!!DEBUG{'='*100}")
 
         text = [msg.get_payload() for msg in email_message.get_payload() if msg.get_content_disposition() is None][0]
         try:  # Occasionally the the plaintext is b64 encoded for some reason?? idk
@@ -62,40 +79,44 @@ class TrelloCard:
         except (UnicodeDecodeError, binascii.Error):
             pass
         text = text.replace("\r", "")
-        print(text)
+        logger.debug(f"original text: \n {text}")
 
         classroom_type = email_message["subject"].split(" ")[1].lower().replace(":", "")
-        print(email_message["subject"])
+
+        logger.debug(f"classroom_type: {classroom_type}")
         og_title = email_message["subject"].split('"', 1)[1][:-1].replace("\r", "").replace("\n ", "\n")
         title = " ".join(og_title.split()).replace("\n", "")
         title = title[:-1] if title.endswith(" ") else title
-        print("title: ", [title], title.endswith(" "), "\n", "og_title: ", [og_title])
+        logger.debug(f"title: {[title]}, {title.endswith(' ')}\nog_title: {[og_title]}")
 
         subject_label = text.split("\n<https://classroom.google.com/c/")[0].split(f" posted a new {classroom_type} in ")[1]
+        logger.debug(f"subject_label: {subject_label}")
+
         try:
             url = "https://classroom.google.com/c/{}".format(text.split("\nOPEN  \n<https://classroom.google.com/c/")[1].split("/details>\n")[0])
         except IndexError:
             url = "https://classroom.google.com/c/{}".format(text.split("\nOpen  \n<https://classroom.google.com/c/")[1].split("/details>\n")[0])
-
-        print("url: ", url)
-        print(text.split(title), len(text.split(title)), title in text,  type(text))
+        logger.debug(f"url: {url}")
+        logger.debug(f"text.split(title) debug: {text.split(title), len(text.split(title)), title in text, type(text)}")
         try:
             description = text.split(og_title)[1].split("\nOPEN  \n<https://classroom.google.com/c/")[0].split("\nOpen  \n<https://classroom.google.com/c/")[0]
         except IndexError:
             description = text.split(title)[1].split("\nOPEN  \n<https://classroom.google.com/c/")[0].split("\nOpen  \n<https://classroom.google.com/c/")[0]
 
         description = f"{url}\n\n{description}"
+        logger.debug(f"description: {description}")
 
         date = None
         if classroom_type == "assignment":
             try:
                 date = text.split(">.\n\n")[1].split(f"\n{title}")[0].replace("Due: ", "").replace("New assignment Due ", "")
-                print(date)
                 date = datetime.datetime.strptime(date, "%b %d")
                 # If the date is in or past Jan, but before Sep, year is increased by 1
                 date = date.replace(year=datetime.datetime.now().year + 1 if 9 > date.month >= 1 else datetime.datetime.now().year)
             except ValueError:
                 date = None
+        logger.debug(f"date: {date}")
+        logger.debug(f"!!END_DEBUG{'='*100}\n\n")
         return cls(title, subject_label, classroom_type, date, description)
 
 
@@ -215,7 +236,7 @@ class Main:
     def create_card(self, card: TrelloCard):
         label_id = self.labels.get(card.subject_label)
         if label_id is None:
-            print(f"Creating missing label: {card.subject_label}")
+            logger.info(f"TRELLO: Creating missing label: {card.subject_label}")
             label_id = requests.post(f"https://trello.com/1/boards/{self.BOARD_ID}/labels",
                                      self.create_trello_post_dict(**{
                                          "id": self.BOARD_ID,
@@ -237,10 +258,10 @@ class Main:
         return card
 
     def main(self):
-        print("a")
+        logger.info(f"{'='*100}\nStarting!")
         self.fetch_labels()
         latest_message_num = int(self.imap_conn.select('INBOX')[1][0]) + 1
-        print(latest_message_num)
+        logger.info(f"Latest message in inbox: {latest_message_num}\n")
 
         for i in range(self.latest_checked_email_num, latest_message_num):
             self.settings["latest_checked_email_num"] = i
@@ -249,8 +270,7 @@ class Main:
             try:
                 self.create_card(TrelloCard.from_email(msg))
             except AssertionError:
-                print(f'''Email with subject: "{msg['subject']}" received: {msg["Date"]} | Failed!!''')
-                print('='*100)
+                logger.info(f'''IGNORED: Subject: {[msg['subject']]} | Received {msg["Date"]}''')
             time.sleep(0.5)  # Rate limits
 
         while True:
@@ -260,10 +280,15 @@ class Main:
             try:
                 self.create_card(TrelloCard.from_email(msg))
             except AssertionError:
-                print(f'''Email with subject: "{msg['subject']}" received: {msg["Date"]} | Failed!!''')
-                print('='*100)
+                logger.info(f'''IGNORED: Subject: {[msg['subject']]} | Received: {msg["Date"]}''')
             time.sleep(0.5)  # Rate limits
 
+    def run_forever(self):
+        while True:
+            try:
+                self.main()
+            except Exception as e:  # run at all costs, exceptions will be added later (ie authentication)
+                logger.error("\n\nERROR in run_forever():", exc_info=sys.exc_info())
 
 
 Main().main()
